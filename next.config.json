@@ -1,0 +1,10 @@
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'export',
+  // Если у вас используются изображения через <Image />, отключаем серверную оптимизацию:
+  images: {
+    unoptimized: true,
+  },
+};
+
+module.exports = nextConfig;

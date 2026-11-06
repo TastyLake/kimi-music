@@ -1,0 +1,171 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  USER
+}
+
+enum TrackStatus {
+  PARSED
+  NEEDS_REVIEW
+}
+
+enum DownloadStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id            String             @id @default(uuid()) @db.Uuid
+  username      String             @unique
+  email         String             @unique
+  passwordHash  String             @map("password_hash")
+  role          Role               @default(USER)
+  canUpload     Boolean            @default(true) @map("can_upload")
+  isBlocked     Boolean            @default(false) @map("is_blocked")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  playlists     Playlist[]
+  favorites     UserFavorite[]
+  refreshTokens RefreshToken[]
+  tracks        Track[]
+  downloads     PlaylistDownload[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Track {
+  id            String          @id @default(uuid()) @db.Uuid
+  ownerId       String          @map("owner_id") @db.Uuid
+  filePath      String          @unique @map("file_path")
+  fileHash      String          @map("file_hash")
+  fileSize      BigInt          @map("file_size")
+  fileMtimeMs   BigInt          @map("file_mtime_ms")
+  title         String
+  artist        String
+  album         String?
+  year          Int?
+  duration      Int             @default(0)
+  coverImageUrl String?         @map("cover_image_url")
+  matchKey      String          @map("match_key")
+  status        TrackStatus     @default(PARSED)
+  enrichedAt    DateTime?       @map("enriched_at")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  genres        TrackGenre[]
+  playlists     PlaylistTrack[]
+  favoritedBy   UserFavorite[]
+  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, fileHash])
+  @@index([ownerId, matchKey])
+  @@index([matchKey])
+  @@index([artist])
+  @@index([createdAt])
+  @@index([status])
+  @@map("tracks")
+}
+
+model Genre {
+  id     String       @id @default(uuid()) @db.Uuid
+  name   String       @unique
+  tracks TrackGenre[]
+
+  @@map("genres")
+}
+
+model TrackGenre {
+  trackId   String  @map("track_id") @db.Uuid
+  genreId   String  @map("genre_id") @db.Uuid
+  isPrimary Boolean @default(false) @map("is_primary")
+  track     Track   @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  genre     Genre   @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([trackId, genreId])
+  @@index([genreId])
+  @@map("track_genres")
+}
+
+model Playlist {
+  id          String             @id @default(uuid()) @db.Uuid
+  userId      String             @map("user_id") @db.Uuid
+  name        String
+  description String?
+  isPublic    Boolean            @default(false) @map("is_public")
+  coverImage  String?            @map("cover_image")
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tracks      PlaylistTrack[]
+  downloads   PlaylistDownload[]
+
+  @@index([userId])
+  @@map("playlists")
+}
+
+model PlaylistDownload {
+  id         String         @id @default(uuid()) @db.Uuid
+  playlistId String         @map("playlist_id") @db.Uuid
+  userId     String         @map("user_id") @db.Uuid
+  artist     String
+  title      String
+  matchKey   String         @map("match_key")
+  position   Int
+  status     DownloadStatus @default(PENDING)
+  progress   Int?
+  error      String?
+  trackId    String?        @map("track_id") @db.Uuid
+  createdAt  DateTime       @default(now()) @map("created_at")
+  updatedAt  DateTime       @updatedAt @map("updated_at")
+  playlist   Playlist       @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([playlistId])
+  @@map("playlist_downloads")
+}
+
+model PlaylistTrack {
+  playlistId String   @map("playlist_id") @db.Uuid
+  trackId    String   @map("track_id") @db.Uuid
+  position   Int
+  addedAt    DateTime @default(now()) @map("added_at")
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  track      Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@id([playlistId, trackId])
+  @@index([playlistId, position])
+  @@map("playlist_tracks")
+}
+
+model UserFavorite {
+  userId  String   @map("user_id") @db.Uuid
+  trackId String   @map("track_id") @db.Uuid
+  addedAt DateTime @default(now()) @map("added_at")
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  track   Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@id([userId, trackId])
+  @@index([userId, addedAt])
+  @@map("user_favorites")
+}
