@@ -1,27 +1,65 @@
-# Имя проекта фиксировано, чтобы обновление программы не создавало новую базу.
-name: loral
-
 services:
   postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
+    image: postgres:15-alpine
+    container_name: kimi-postgres
+    restart: always
     environment:
-      POSTGRES_USER: music
-      POSTGRES_PASSWORD: music
-      POSTGRES_DB: music
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kimi_db
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kimi-net
 
   redis:
-    image: redis:7-alpine
-    restart: unless-stopped
+    image: redis:alpine
+    container_name: kimi-redis
+    restart: always
+    networks:
+      - kimi-net
+
+  backend:
+    build: ./backend
+    container_name: kimi-backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@kimi-postgres:5432/kimi_db?schema=public
+      REDIS_URL: redis://kimi-redis:6379
+      PORT: 5000
+      JWT_ACCESS_SECRET: super_secret_access_key_12345
+      JWT_REFRESH_SECRET: super_secret_refresh_key_67890
+      CORS_ORIGIN: "http://xn--h1aage.space,https://xn--h1aage.space,http://188.130.154.181"
     ports:
-      - "6379:6379"
+      - "5000:5000"
     volumes:
-      - redisdata:/data
+      - kimi_media:/app/media
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - kimi-net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: "/api"
+        VITE_API_URL: "/api"
+        REACT_APP_API_URL: "/api"
+    container_name: kimi-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - kimi-net
 
 volumes:
-  pgdata:
-  redisdata:
+  postgres_data:
+  kimi_media:
+
+networks:
+  kimi-net:
+    driver: bridge

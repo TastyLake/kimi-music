@@ -6,7 +6,6 @@ import type { Request, Response } from 'express';
 
 const router = Router();
 
-// Все роуты плейлистов требуют авторизации
 router.use(authMiddleware());
 
 const createPlaylistSchema = z.object({
@@ -16,12 +15,17 @@ const createPlaylistSchema = z.object({
 });
 
 const updatePlaylistSchema = createPlaylistSchema.partial();
-
 const addTrackSchema = z.object({
   trackId: z.string().uuid(),
 });
 
-/* ---------------- 1. Получить список плейлистов пользователя ---------------- */
+const formatCover = (img: string | null | undefined) => {
+  if (!img) return null;
+  if (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/')) return img;
+  return `/media/${img}`;
+};
+
+/* ---------------- 1. Получить список плейлистов ---------------- */
 router.get('/', async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -29,15 +33,11 @@ router.get('/', async (req: Request, res: Response) => {
       where: { userId },
       orderBy: { updatedAt: 'desc' },
       include: {
-        _count: {
-          select: { tracks: true },
-        },
+        _count: { select: { tracks: true } },
         tracks: {
           take: 1,
           include: {
-            track: {
-              select: { coverImageUrl: true },
-            },
+            track: { select: { coverImageUrl: true } },
           },
         },
       },
@@ -48,7 +48,7 @@ router.get('/', async (req: Request, res: Response) => {
       name: p.name,
       description: p.description,
       isPublic: p.isPublic,
-      coverUrl: p.coverImage ?? p.tracks[0]?.track?.coverImageUrl ?? null,
+      coverUrl: formatCover(p.coverImage ?? p.tracks[0]?.track?.coverImageUrl),
       trackCount: p._count.tracks,
       owner: req.user!.username,
       isMine: true,
@@ -57,11 +57,12 @@ router.get('/', async (req: Request, res: Response) => {
 
     return res.json({ items });
   } catch (error) {
+    console.error('[Playlists GET Error]', error);
     return res.status(500).json({ error: 'internal_error', message: 'Ошибка при получении плейлистов' });
   }
 });
 
-/* ---------------- 2. Создать новый плейлист ---------------- */
+/* ---------------- 2. Создать плейлист ---------------- */
 router.post('/', async (req: Request, res: Response) => {
   try {
     const body = createPlaylistSchema.parse(req.body);
@@ -95,10 +96,14 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-/* ---------------- 3. Получить детали конкретного плейлиста ---------------- */
+/* ---------------- 3. Получить детали плейлиста (Защита от 400/404) ---------------- */
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
+    if (!id || id === 'undefined' || id === 'null') {
+      return res.status(400).json({ error: 'bad_request', message: 'Некорректный ID плейлиста' });
+    }
+
     const userId = req.user!.id;
 
     const playlist = await prisma.playlist.findUnique({
@@ -110,16 +115,12 @@ router.get('/:id', async (req: Request, res: Response) => {
           include: {
             track: {
               include: {
-                genres: {
-                  include: { genre: true },
-                },
+                genres: { include: { genre: true } },
               },
             },
           },
         },
-        downloads: {
-          orderBy: { createdAt: 'desc' },
-        },
+        downloads: { orderBy: { createdAt: 'desc' } },
       },
     });
 
@@ -139,7 +140,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       album: pt.track.album,
       year: pt.track.year,
       duration: pt.track.duration,
-      coverUrl: pt.track.coverImageUrl ?? null,
+      coverUrl: formatCover(pt.track.coverImageUrl),
       status: pt.track.status,
       createdAt: pt.track.createdAt.toISOString(),
       genres: pt.track.genres?.map((g: any) => ({ name: g.genre.name, primary: g.isPrimary })) ?? [],
@@ -163,6 +164,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       })),
     });
   } catch (error) {
+    console.error('[Playlist Detail Error]', error);
     return res.status(500).json({ error: 'internal_error', message: 'Ошибка получения плейлиста' });
   }
 });
@@ -195,6 +197,10 @@ router.patch('/:id', async (req: Request, res: Response) => {
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
+    if (!id || id === 'undefined') {
+      return res.status(400).json({ error: 'bad_request', message: 'Некорректный ID' });
+    }
+
     const userId = req.user!.id;
 
     const playlist = await prisma.playlist.findUnique({ where: { id } });
@@ -203,14 +209,18 @@ router.delete('/:id', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'forbidden', message: 'Нет прав на удаление' });
     }
 
+    // Сначала удаляем связи с треками
+    await prisma.playlistTrack.deleteMany({ where: { playlistId: id } });
     await prisma.playlist.delete({ where: { id } });
+
     return res.status(204).send();
   } catch (error) {
+    console.error('[Playlist Delete Error]', error);
     return res.status(500).json({ error: 'internal_error', message: 'Не удалось удалить плейлист' });
   }
 });
 
-/* ---------------- 6. Добавить трек в плейлист (с защитой P2002) ---------------- */
+/* ---------------- 6. Добавить трек в плейлист ---------------- */
 router.post('/:id/tracks', async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
@@ -273,57 +283,12 @@ router.delete('/:id/tracks/:trackId', async (req: Request, res: Response) => {
     }
 
     await prisma.playlistTrack.deleteMany({
-      where: {
-        playlistId: id,
-        trackId,
-      },
+      where: { playlistId: id, trackId },
     });
 
     return res.status(204).send();
   } catch (error) {
     return res.status(500).json({ error: 'internal_error', message: 'Не удалось убрать трек из плейлиста' });
-  }
-});
-
-/* ---------------- 8. Управление фоновыми загрузками плейлиста ---------------- */
-router.post('/:id/downloads/:downloadId/cancel', async (req: Request, res: Response) => {
-  try {
-    const id = String(req.params.id);
-    const downloadId = String(req.params.downloadId);
-    await prisma.playlistDownload.updateMany({
-      where: { id: downloadId, playlistId: id },
-      data: { status: 'CANCELLED', error: 'Отменено пользователем' },
-    });
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ error: 'internal_error', message: 'Не удалось отменить' });
-  }
-});
-
-router.post('/:id/downloads/:downloadId/retry', async (req: Request, res: Response) => {
-  try {
-    const id = String(req.params.id);
-    const downloadId = String(req.params.downloadId);
-    await prisma.playlistDownload.updateMany({
-      where: { id: downloadId, playlistId: id },
-      data: { status: 'PENDING', error: null, progress: null },
-    });
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ error: 'internal_error', message: 'Не удалось перезапустить' });
-  }
-});
-
-router.post('/:id/downloads/retry', async (req: Request, res: Response) => {
-  try {
-    const id = String(req.params.id);
-    await prisma.playlistDownload.updateMany({
-      where: { playlistId: id, status: 'FAILED' },
-      data: { status: 'PENDING', error: null, progress: null },
-    });
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ error: 'internal_error', message: 'Не удалось перезапустить ошибки' });
   }
 });
 

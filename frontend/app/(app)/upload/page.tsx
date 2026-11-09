@@ -2,181 +2,221 @@
 
 import { useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Loader2, UploadCloud } from 'lucide-react';
-import { api, ApiError, uploadFile } from '@/lib/api';
+import { api, ApiError, uploadFile, type UploadOutcome } from '@/lib/api';
 import { NAMING_HINT, validateUploadName } from '@/lib/filename';
-import { cn, formatBytes } from '@/lib/utils';
-import { useAuth } from '@/store/auth';
+import { formatBytes } from '@/lib/utils';
 
-interface Row {
+type Status = 'pending' | 'uploading' | 'success' | 'duplicate' | 'error';
+
+interface UploadItem {
   id: number;
-  name: string;
-  size: number;
-  state: 'invalid' | 'queued' | 'uploading' | 'done' | 'error';
+  file: File;
+  status: Status;
   progress: number;
   message?: string;
 }
 
-let rowId = 0;
+// Бэкенд может отдавать id созданного трека в разных полях
+type UploadResult = UploadOutcome & { track?: { id?: string }; trackId?: string; id?: string };
+
+let nextId = 0;
+
+const playlistName = () => {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `Загрузка от ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 export default function UploadPage() {
-  const canUpload = useAuth((s) => s.user?.canUpload);
-  const [rows, setRows] = useState<Row[]>([]);
-  const [dragging, setDragging] = useState(false);
-  const input = useRef<HTMLInputElement>(null);
-  const running = useRef(false);
-  const queue = useRef<{ id: number; file: File }[]>([]);
-  const playlistIdRef = useRef<string | null>(null);
+  const [items, setItems] = useState<UploadItem[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const patch = (id: number, p: Partial<Row>) =>
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
+  const patch = (id: number, p: Partial<UploadItem>) =>
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...p } : i)));
 
-  const ensurePlaylist = async () => {
-    if (playlistIdRef.current) return playlistIdRef.current;
-    const now = new Date();
-    const dateStr = `${now.getDate()}.${now.getMonth() + 1}.${now.getFullYear()} ${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`;
-    try {
-      const pl = await api<{ id: string }>('/playlists', {
-        method: 'POST',
-        body: {
-          name: `Загрузка от ${dateStr}`,
-          isPublic: false,
-        },
-      });
-      playlistIdRef.current = pl.id;
-      return pl.id;
-    } catch {
-      return null;
-    }
+  const handleFiles = (files: FileList | File[]) => {
+    const fresh = Array.from(files).map((file): UploadItem => {
+      const check = validateUploadName(file.name);
+      return check.ok
+        ? { id: ++nextId, file, status: 'pending', progress: 0 }
+        : { id: ++nextId, file, status: 'error', progress: 0, message: check.error };
+    });
+    setItems((prev) => [...prev, ...fresh]);
   };
 
-  const pump = async () => {
-    if (running.current) return;
-    running.current = true;
+  // Загружаем новые файлы и повторяем те, что упали при загрузке (но не с неверным именем)
+  const isUploadable = (i: UploadItem) =>
+    i.status === 'pending' || (i.status === 'error' && validateUploadName(i.file.name).ok);
+  const uploadableCount = items.filter(isUploadable).length;
 
-    // Создаем плейлист перед стартом пачки файлов
-    const playlistId = await ensurePlaylist();
+  const startUpload = async () => {
+    if (isUploading) return;
+    const queue = items.filter(isUploadable);
+    if (queue.length === 0) return;
 
-    while (queue.current.length) {
-      const { id, file } = queue.current.shift()!;
-      patch(id, { state: 'uploading', progress: 0 });
+    setIsUploading(true);
+    let playlistId: string | null = null; // один плейлист на всю пачку файлов
+    for (const item of queue) {
+      patch(item.id, { status: 'uploading', progress: 0, message: undefined });
       try {
-        const r = await uploadFile(file, (progress) => patch(id, { progress }));
-        const createdTrack = (r as { track?: { id: string } }).track;
+        const r = (await uploadFile(item.file, (progress) => patch(item.id, { progress }))) as UploadResult;
+        console.debug('[upload] ответ сервера:', r);
+        const st = String(r.status ?? '').toLowerCase();
 
-        if (r.status === 'created' && createdTrack?.id) {
-          if (playlistId) {
-            await api(`/playlists/${playlistId}/tracks`, {
-              method: 'POST',
-              body: { trackId: createdTrack.id },
-            }).catch(() => null);
-          }
-          patch(id, { state: 'done', progress: 100, message: 'Добавлено в плейлист и библиотеку' });
-        } else if (r.status === 'duplicate') {
-          patch(id, { state: 'invalid', message: r.error ?? 'Уже есть в библиотеке' });
+        if (st === 'duplicate') {
+          patch(item.id, { status: 'duplicate', message: r.error ?? 'Уже есть в библиотеке' });
+        } else if (st === 'error' || st === 'failed' || r.error) {
+          patch(item.id, { status: 'error', message: r.error ?? 'Не удалось добавить' });
         } else {
-          patch(id, { state: 'error', message: r.error ?? 'Не удалось добавить' });
+          // Любой ответ без ошибки считаем успешной загрузкой
+          const trackId = r.track?.id ?? r.trackId ?? r.id;
+          let message: string | undefined;
+          if (trackId) {
+            try {
+              if (!playlistId) {
+                const pl: { id: string } = await api('/playlists', {
+                  method: 'POST',
+                  body: { name: playlistName(), isPublic: false },
+                });
+                playlistId = pl.id;
+              }
+              await api(`/playlists/${playlistId}/tracks`, { method: 'POST', body: { trackId } });
+              message = 'Добавлено в плейлист';
+            } catch {
+              message = 'Загружено, но в плейлист не добавлено';
+            }
+          } else {
+            message = 'Загружено (сервер не вернул id трека)';
+          }
+          patch(item.id, { status: 'success', progress: 100, message });
         }
       } catch (e) {
-        patch(id, { state: 'error', message: e instanceof ApiError ? e.message : 'Ошибка загрузки' });
+        patch(item.id, { status: 'error', message: e instanceof ApiError ? e.message : 'Ошибка загрузки' });
       }
     }
-
-    // Сбрасываем ID плейлиста для следующей сессии загрузки
-    playlistIdRef.current = null;
-    running.current = false;
+    setIsUploading(false);
   };
-
-  const addFiles = (list: FileList | File[]) => {
-    const fresh: Row[] = [];
-    for (const file of Array.from(list)) {
-      const id = ++rowId;
-      const check = validateUploadName(file.name);
-      if (check.ok) {
-        fresh.push({ id, name: file.name, size: file.size, state: 'queued', progress: 0 });
-        queue.current.push({ id, file });
-      } else {
-        fresh.push({ id, name: file.name, size: file.size, state: 'invalid', progress: 0, message: check.error });
-      }
-    }
-    setRows((rs) => [...fresh, ...rs]);
-    void pump();
-  };
-
-  if (!canUpload) {
-    return <div className="card p-8 text-center text-sm text-pink-300/70">У вас нет прав на загрузку треков. Обратитесь к администратору.</div>;
-  }
 
   return (
-    <div className="space-y-5">
-      <h1 className="text-2xl font-bold bg-gradient-to-r from-pink-300 via-rose-300 to-purple-300 bg-clip-text text-transparent">
-        Загрузка треков
-      </h1>
+    <div className="flex flex-col h-full p-6 max-w-4xl mx-auto overflow-y-auto">
+      <h1 className="text-2xl font-bold text-pink-100 mb-6">Загрузка треков</h1>
 
       <div
         onDragOver={(e) => {
           e.preventDefault();
-          setDragging(true);
+          setIsDragging(true);
         }}
-        onDragLeave={() => setDragging(false)}
+        onDragLeave={() => setIsDragging(false)}
         onDrop={(e) => {
           e.preventDefault();
-          setDragging(false);
-          addFiles(e.dataTransfer.files);
+          setIsDragging(false);
+          if (e.dataTransfer.files) handleFiles(e.dataTransfer.files);
         }}
-        onClick={() => input.current?.click()}
-        className={cn(
-          'flex cursor-pointer flex-col items-center gap-2 rounded-2xl border-2 border-dashed px-6 py-14 text-center transition-all duration-300 backdrop-blur-md',
-          dragging
-            ? 'border-pink-400 bg-pink-500/10 scale-[1.01]'
-            : 'border-pink-500/20 bg-pink-950/20 hover:border-pink-400/50 hover:bg-pink-900/20',
-        )}
+        onClick={() => inputRef.current?.click()}
+        className={`cursor-pointer border-2 border-dashed rounded-2xl p-10 text-center transition-all ${
+          isDragging
+            ? 'border-pink-400 bg-pink-500/20'
+            : 'border-pink-500/30 bg-pink-950/20 hover:border-pink-500/50'
+        }`}
       >
-        <UploadCloud size={40} className="text-pink-400 animate-pulse" />
-        <div className="font-semibold text-pink-100">Перетащите файлы сюда или нажмите для выбора</div>
-        <div className="text-xs text-pink-300/60">
-          Формат имени: <code className="rounded-md bg-pink-950/60 px-2 py-0.5 border border-pink-500/20 text-pink-200">Исполнитель - Название.mp3</code>
+        <div className="flex flex-col items-center justify-center gap-3">
+          <UploadCloud size={48} className="text-pink-400" />
+          <p className="text-pink-200 font-medium">Перетащите файлы сюда или нажмите для выбора</p>
+          <p className="text-xs text-pink-300/50">Формат имени: Исполнитель - Название.mp3</p>
+          <span className="mt-2 bg-pink-500 hover:bg-pink-600 text-pink-950 font-bold px-4 py-2 rounded-xl transition-all shadow-lg shadow-pink-500/20">
+            Выбрать файлы
+          </span>
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            accept=".mp3,.flac,.wav,.ogg,.m4a,.opus,audio/*"
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files) handleFiles(e.target.files);
+              e.target.value = ''; // чтобы можно было выбрать тот же файл повторно
+            }}
+          />
         </div>
-        <input
-          ref={input}
-          type="file"
-          multiple
-          accept=".mp3,.flac,.wav,.ogg,.m4a,.opus,audio/*"
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files) addFiles(e.target.files);
-            e.target.value = '';
-          }}
-        />
       </div>
 
-      {rows.length > 0 && (
-        <ul className="rounded-2xl border border-pink-500/15 bg-pink-950/20 backdrop-blur-md divide-y divide-pink-500/10 overflow-hidden">
-          {rows.map((r) => (
-            <li key={r.id} className="flex items-center gap-3 px-4 py-3">
-              {r.state === 'done' && <CheckCircle2 size={18} className="shrink-0 text-pink-400" />}
-              {(r.state === 'invalid' || r.state === 'error') && <AlertCircle size={18} className="shrink-0 text-rose-400" />}
-              {r.state === 'uploading' && <Loader2 size={18} className="shrink-0 animate-spin text-pink-300" />}
-              {r.state === 'queued' && <Loader2 size={18} className="shrink-0 text-pink-500/40" />}
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-pink-100">{r.name}</div>
-                <div className={cn('text-xs', r.state === 'invalid' || r.state === 'error' ? 'text-rose-300' : 'text-pink-300/60')}>
-                  {r.state === 'uploading'
-                    ? `Загрузка… ${r.progress}%`
-                    : r.state === 'queued'
-                      ? `В очереди · ${formatBytes(r.size)}`
-                      : (r.message ?? '')}
-                </div>
-                {r.state === 'uploading' && (
-                  <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-pink-950">
-                    <div className="h-full bg-gradient-to-r from-pink-500 to-rose-400 transition-all duration-200" style={{ width: `${r.progress}%` }} />
+      {items.length > 0 && (
+        <div className="mt-6 flex flex-col gap-3">
+          <div className="flex justify-between items-center">
+            <span className="text-sm font-medium text-pink-200/70">Выбрано файлов: {items.length}</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setItems((prev) => prev.filter((i) => i.status === 'uploading'))}
+                disabled={isUploading}
+                className="text-xs font-medium text-pink-300/60 hover:text-pink-100 disabled:opacity-40 cursor-pointer"
+              >
+                Очистить список
+              </button>
+              <button
+                onClick={() => void startUpload()}
+                disabled={isUploading || uploadableCount === 0}
+                className="bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-medium px-5 py-2 rounded-xl text-sm transition-all disabled:opacity-50 cursor-pointer shadow-md shadow-pink-950"
+              >
+                {isUploading ? 'Загрузка...' : 'Загрузить все'}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 mt-2">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-pink-950/30 border border-pink-500/15"
+              >
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  {item.status === 'success' && <CheckCircle2 className="text-emerald-400 shrink-0" size={20} />}
+                  {item.status === 'duplicate' && <CheckCircle2 className="text-amber-300 shrink-0" size={20} />}
+                  {item.status === 'error' && <AlertCircle className="text-rose-400 shrink-0" size={20} />}
+                  {item.status === 'uploading' && <Loader2 className="text-pink-400 shrink-0 animate-spin" size={20} />}
+                  {item.status === 'pending' && <div className="w-5 h-5 rounded-full border-2 border-pink-500/30 shrink-0" />}
+
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-pink-100">{item.file.name}</div>
+                    {item.status === 'uploading' && (
+                      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-pink-950">
+                        <div
+                          className="h-full bg-gradient-to-r from-pink-500 to-rose-400 transition-all duration-200"
+                          style={{ width: `${item.progress}%` }}
+                        />
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
+
+                <span className="shrink-0 text-xs font-medium">
+                  {item.status === 'success' && (
+                    <span className="text-emerald-300 bg-emerald-950/50 border border-emerald-500/20 px-2 py-1 rounded-md">{item.message ?? 'Успешно'}</span>
+                  )}
+                  {item.status === 'duplicate' && (
+                    <span className="text-amber-200 bg-amber-950/50 border border-amber-500/20 px-2 py-1 rounded-md">
+                      {item.message ?? 'Уже есть'}
+                    </span>
+                  )}
+                  {item.status === 'error' && (
+                    <span className="block max-w-xs truncate text-rose-300 bg-rose-950/50 border border-rose-500/20 px-2 py-1 rounded-md" title={item.message}>
+                      {item.message ?? 'Ошибка'}
+                    </span>
+                  )}
+                  {item.status === 'uploading' && (
+                    <span className="text-pink-300 bg-pink-950/50 border border-pink-500/20 px-2 py-1 rounded-md">{item.progress}%</span>
+                  )}
+                  {item.status === 'pending' && <span className="text-pink-300/50">Ожидание · {formatBytes(item.file.size)}</span>}
+                </span>
               </div>
-            </li>
-          ))}
-        </ul>
+            ))}
+          </div>
+        </div>
       )}
-      <p className="text-xs text-pink-400/40">{NAMING_HINT}</p>
+
+      <p className="mt-6 text-xs text-pink-400/40">{NAMING_HINT}</p>
     </div>
   );
 }
+

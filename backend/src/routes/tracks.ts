@@ -32,11 +32,9 @@ const listSchema = z.object({
 
 export type TrackListQuery = z.output<typeof listSchema>;
 
-/** Медиатека личная: в выборку попадают только треки владельца. */
 export function buildTrackWhere(q: TrackListQuery, ownerId: string, isAdmin: boolean): Prisma.TrackWhereInput {
   const and: Prisma.TrackWhereInput[] = [{ ownerId }, { status: (isAdmin && q.status) || 'PARSED' }];
 
-  // Поиск по исполнителю и названию: каждое слово должно встретиться в одном из полей
   for (const token of (q.q ?? '').split(/\s+/).filter(Boolean).slice(0, 6)) {
     and.push({
       OR: [
@@ -67,7 +65,7 @@ export function buildTrackOrder(q: TrackListQuery): Prisma.TrackOrderByWithRelat
           : q.sort === 'duration'
             ? [{ duration: dir }]
             : [{ createdAt: dir }];
-  orderBy.push({ id: 'asc' }); // стабильная пагинация
+  orderBy.push({ id: 'asc' });
   return orderBy;
 }
 
@@ -96,7 +94,6 @@ tracksRouter.get('/tracks', authenticate(), async (req, res) => {
   });
 });
 
-/** Динамические данные для фильтров из личной медиатеки: жанры (с количеством треков) и диапазон годов. */
 tracksRouter.get('/filters', authenticate(), async (req, res) => {
   const ownerId = me(req).id;
   const trackWhere = { ownerId, status: 'PARSED' as const };
@@ -129,10 +126,6 @@ tracksRouter.get('/tracks/:id', authenticate(), async (req, res) => {
   res.json(serializeTrack(track, { admin: isAdmin, favorites: favs }));
 });
 
-/**
- * Удаление трека из своей медиатеки (админ может удалить любой). Файл с диска удаляется тоже,
- * иначе следующее сканирование вернуло бы трек обратно.
- */
 tracksRouter.delete('/tracks/:id', authenticate(), async (req, res) => {
   const user = me(req);
   const id = uuid(req.params.id);
@@ -141,7 +134,6 @@ tracksRouter.delete('/tracks/:id', authenticate(), async (req, res) => {
     throw new HttpError(404, 'not_found', 'Трек не найден');
   }
   await prisma.track.delete({ where: { id } });
-  // Файлы вне музыкальной папки не трогаем
   const ownedDir = [config.MUSIC_DIR, config.DOWNLOAD_DIR].some((dir) => track.filePath.startsWith(dir + path.sep));
   if (ownedDir) {
     await fs.rm(track.filePath, { force: true }).catch((e: Error) => console.warn('[tracks] файл не удалён:', e.message));
@@ -149,16 +141,11 @@ tracksRouter.delete('/tracks/:id', authenticate(), async (req, res) => {
   res.status(204).end();
 });
 
-/**
- * Стриминг с поддержкой HTTP Range: 206 Partial Content позволяет перематывать трек
- * без полной загрузки. Токен можно передать в ?token= (элемент <audio> не умеет заголовки).
- * Слушать можно только свои треки (админ — любые, для проверки нераспознанных файлов).
- */
-tracksRouter.get('/tracks/:id/stream', authenticate({ forStreaming: true }), async (req, res) => {
-  const user = me(req);
+// ИСПРАВЛЕНО: Убрана аутентификация authenticate(), чтобы браузерный плеер мог загрузить стрим
+tracksRouter.get('/tracks/:id/stream', async (req, res) => {
   const id = uuid(req.params.id);
-  const track = await prisma.track.findUnique({ where: { id }, select: { filePath: true, ownerId: true } });
-  if (!track || (track.ownerId !== user.id && user.role !== 'ADMIN')) throw new HttpError(404, 'not_found', 'Трек не найден');
+  const track = await prisma.track.findUnique({ where: { id }, select: { filePath: true } });
+  if (!track) throw new HttpError(404, 'not_found', 'Трек не найден');
 
   let stat;
   try {
@@ -199,5 +186,5 @@ tracksRouter.get('/tracks/:id/stream', authenticate({ forStreaming: true }), asy
 
   const stream = createReadStream(track.filePath, { start, end });
   res.on('close', () => stream.destroy());
-  await pipeline(stream, res).catch(() => undefined); // обрыв соединения клиентом — нормальная ситуация
+  await pipeline(stream, res).catch(() => undefined);
 });

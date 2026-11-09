@@ -1,104 +1,80 @@
-import cors from 'cors';
 import express from 'express';
-import helmet from 'helmet';
-import { config } from './config.js';
-import { prisma } from './lib/prisma.js';
-import { HttpError, errorHandler } from './lib/http.js';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import path from 'path';
+import { PrismaClient } from '@prisma/client';
+
 import { authRouter } from './routes/auth.js';
 import { tracksRouter } from './routes/tracks.js';
-import { favoritesRouter } from './routes/favorites.js';
 import { playlistsRouter } from './routes/playlists.js';
 import { uploadRouter } from './routes/upload.js';
 import { adminRouter } from './routes/admin.js';
 import { discoverRouter } from './routes/discover.js';
-import { runCleanup } from './services/maintenance.js';
 import { importRouter } from './routes/import.js';
+import { spotifyRouter } from './routes/spotify.js';
 import { downloadsRouter } from './routes/downloads.js';
-import { spotifyImportRouter } from './services/import.service.js';
-import { ensureAdmin, ensureDirs } from './services/bootstrap.js';
-import { runScan } from './services/scanner.js';
-import { startWorker } from './jobs/worker.js';
-import { startImporterWorker } from './workers/importer.worker.js';
-import { startDownloadQueue } from './services/downloadWorker.js';
+import { favoritesRouter } from './routes/favorites.js';
 
-// Защита процесса от неперехваченных ошибок
-process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason);
-});
-process.on('uncaughtException', (error) => {
-  console.error('[uncaughtException]', error);
-});
+dotenv.config();
 
-async function main() {
-  await ensureDirs();
-  await ensureAdmin();
+const app = express();
+const prisma = new PrismaClient();
+const PORT = process.env.PORT || 3000;
 
-  const app = express();
-  // За фронтом/прокси: доверяем только приватным сетям, чтобы лимитер видел реальный IP клиента
-  app.set('trust proxy', 'loopback, linklocal, uniquelocal');
-  app.disable('x-powered-by');
-
-  // CORP cross-origin: <audio>/<img> с другого origin должны иметь возможность загрузить ресурсы
-  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-  app.use(cors({ origin: config.CORS_ORIGIN.split(',').map((s) => s.trim()), exposedHeaders: ['Content-Range', 'Accept-Ranges'] }));
-  app.use(express.json({ limit: '1mb' }));
-
-  app.get('/api/health', (_req, res) => {
-    res.json({ ok: true });
+// Логгер запросов для отладки
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    console.log(`[HTTP] ${req.method} ${req.url} -> ${res.statusCode}`);
   });
-
-  // Обложки: имена — хэши содержимого, поэтому кешируем «навсегда»
-  app.use('/api/covers', express.static(config.COVERS_DIR, { maxAge: '30d', immutable: true, index: false }));
-
-  app.use('/api/auth', authRouter);
-  app.use('/api', tracksRouter); // /tracks, /filters, /tracks/:id/stream
-  app.use('/api/favorites', favoritesRouter);
-  app.use('/api/playlists', playlistsRouter);
-  app.use('/api', uploadRouter); // /upload
-  app.use('/api/discover', discoverRouter);
-  app.use('/api/import', importRouter);
-  app.use('/api/downloads', downloadsRouter);
-  app.use('/api/v1/import', spotifyImportRouter);
-  app.use('/api/admin', adminRouter);
-
-  app.use('/api', (_req, _res, next) => next(new HttpError(404, 'not_found', 'Маршрут не найден')));
-  app.use(errorHandler);
-
-  const host = process.env.HOST || '0.0.0.0';
-  const server = app.listen(config.PORT, host, () => {
-  console.log(`[api] http://${host}:${config.PORT}`);
+  next();
 });
 
-server.keepAliveTimeout = 300000; // 5 минут
-server.headersTimeout = 305000;   // 5 минут + 5 сек
+app.use(cors({
+  origin: '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Range']
+}));
 
-  const worker = config.RUN_WORKER_IN_PROCESS ? await startWorker() : null;
-  const importer = config.RUN_WORKER_IN_PROCESS ? startImporterWorker() : null;
-  await startDownloadQueue();
-  if (config.SCAN_ON_START) void runScan();
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-  // Автоматическая чистка БД и диска
-  const cleanup = () =>
-    void runCleanup()
-      .then((r) => console.log('[cleanup]', r))
-      .catch((e) => console.error('[cleanup]', e));
+// Раздача статики (медиа и обложки)
+const mediaPath = path.join(process.cwd(), 'media');
+app.use('/media', express.static(mediaPath));
+app.use('/api/media', express.static(mediaPath));
 
-  setTimeout(cleanup, 60_000).unref();
-  setInterval(cleanup, 24 * 60 * 60 * 1000).unref();
+const uploadsPath = path.join(process.cwd(), 'uploads');
+app.use('/uploads', express.static(uploadsPath));
+app.use('/api/uploads', express.static(uploadsPath));
 
-  const shutdown = async (signal: string) => {
-    console.log(`[api] ${signal}: останавливаюсь`);
-    server.close();
-    await worker?.close().catch(() => undefined);
-    await importer?.close().catch(() => undefined);
-    await prisma.$disconnect();
-    process.exit(0);
-  };
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-}
+app.get('/', (req, res) => res.json({ message: 'Kima Music Server API' }));
+app.get('/api', (req, res) => res.json({ status: 'ok' }));
 
-main().catch((e) => {
-  console.error('Не удалось запустить сервер:', e);
-  process.exit(1);
+// Универсальный монтировщик префиксов
+const mount = (router: any, prefix: string) => {
+  app.use(`/api/${prefix}`, router);
+  app.use(`/${prefix}`, router);
+};
+
+mount(authRouter, 'auth');
+mount(uploadRouter, 'upload'); // Теперь запрос на /upload и /api/upload идет прямо в uploadRouter
+mount(adminRouter, 'admin');
+mount(discoverRouter, 'discover');
+mount(importRouter, 'import');
+mount(spotifyRouter, 'spotify');
+mount(playlistsRouter, 'playlists');
+mount(downloadsRouter, 'downloads');
+mount(favoritesRouter, 'favorites');
+
+// Треки монтируются в корень, так как пути прописаны внутри файла tracks.ts
+app.use('/api', tracksRouter);
+app.use('/', tracksRouter);
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found' });
+});
+
+app.listen(PORT, () => {
+  console.log(`[api] http://0.0.0.0:${PORT}`);
 });

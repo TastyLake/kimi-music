@@ -1,12 +1,17 @@
-import { PlaylistClient } from './PlaylistClient';
+import PlaylistClient from './PlaylistClient';
 
-export const dynamic = 'force-static';
-export const dynamicParams = false;
-
-export async function generateStaticParams() {
-  return [];
+interface PageProps {
+  params: Promise<{ id: string }>;
 }
 
-export default function PlaylistPage() {
-  return <PlaylistClient />;
+export default async function Page({ params }: PageProps) {
+  const { id } = await params;
+
+  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/playlists/${id}`, {
+    cache: 'no-store'
+  });
+  
+  const playlist = res.ok ? await res.json() : { id, title: 'Плейлист', tracks: [] };
+
+  return <PlaylistClient playlist={playlist} />;
 }

@@ -43,7 +43,7 @@ let refreshing: Promise<boolean> | null = null;
 /** Обновляет пару токенов по refresh-токену (один запрос на всех параллельных вызовов). */
 export function refreshSession(): Promise<boolean> {
   refreshing ??= (async () => {
-    const { refreshToken, setSession, logout } = useAuth.getState();
+    const { refreshToken, logout } = useAuth.getState();
     if (!refreshToken) return false;
     try {
       const res = await fetch(`${API_BASE}/auth/refresh`, {
@@ -55,7 +55,16 @@ export function refreshSession(): Promise<boolean> {
         if (res.status === 401 || res.status === 403) logout();
         return false;
       }
-      setSession((await res.json()) as Session);
+      const data = (await res.json().catch(() => null)) as Partial<Session> | null;
+      const accessToken = data?.accessToken;
+      if (!data || !accessToken) return false;
+      // Не затираем user / streamToken, если бэкенд вернул только токены
+      useAuth.setState((s) => ({
+        user: data.user ?? s.user,
+        accessToken,
+        refreshToken: data.refreshToken ?? s.refreshToken,
+        streamToken: data.streamToken ?? s.streamToken,
+      }));
       return true;
     } catch {
       return false;
@@ -73,6 +82,7 @@ export async function refreshStreamToken(): Promise<void> {
 
 interface ApiOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** объект → JSON; FormData отправляется как multipart/form-data */
   body?: unknown;
   query?: Query;
   signal?: AbortSignal;
@@ -81,15 +91,19 @@ interface ApiOptions {
 }
 
 export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Promise<T> {
+  const hasBody = opts.body !== undefined;
+  const isForm = typeof FormData !== 'undefined' && opts.body instanceof FormData;
+
   const doFetch = () => {
     const token = useAuth.getState().accessToken;
     return fetch(buildUrl(path, opts.query), {
       method: opts.method ?? 'GET',
       headers: {
-        ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        // Для FormData Content-Type выставляет браузер (вместе с boundary)
+        ...(hasBody && !isForm ? { 'Content-Type': 'application/json' } : {}),
         ...(token && !opts.anonymous ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      body: !hasBody ? undefined : isForm ? (opts.body as FormData) : JSON.stringify(opts.body),
       signal: opts.signal,
     });
   };
@@ -121,7 +135,7 @@ export interface UploadOutcome {
   error?: string;
 }
 
-/** 
+/**
  * Загрузка одного файла в личную медиатеку с прогрессом и повторами при ошибках 5xx / сбоях сети.
  */
 export function uploadFile(file: File, onProgress: (pct: number) => void): Promise<UploadOutcome> {
@@ -132,13 +146,13 @@ export function uploadFile(file: File, onProgress: (pct: number) => void): Promi
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE}/upload`);
       xhr.setRequestHeader('Authorization', `Bearer ${useAuth.getState().accessToken ?? ''}`);
-      
+
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
 
       xhr.onerror = () => reject(new ApiError(0, 'network', 'Нет связи с сервером'));
-      
+
       xhr.onload = async () => {
         if (xhr.status === 401 && canRetrySession && (await refreshSession())) {
           return sendOnce(false).then(resolve, reject);
@@ -167,13 +181,13 @@ export function uploadFile(file: File, onProgress: (pct: number) => void): Promi
         return await sendOnce(true);
       } catch (err) {
         if (err instanceof ApiError) {
-          // Если ошибка на стороне клиента (4xx, кроме 429), не повторяем
+          // Ошибки клиента (4xx, кроме 429) не повторяем
           if (err.status >= 400 && err.status < 500 && err.status !== 429) {
             throw err;
           }
         }
         if (attempt === maxRetries - 1) throw err;
-        // Пауза 2 секунды перед повтором при 500 / 502 / network error
+        // Пауза 2 секунды перед повтором при 5xx / сбое сети
         await new Promise((r) => setTimeout(r, 2000));
       }
     }
