@@ -105,8 +105,8 @@ async function main() {
     startTrackDownloadWorker();
     resumeTrackDownloads().catch((e) => console.error('[download] не удалось восстановить очередь:', e));
   }
-  app.listen(config.PORT, () => {
-    console.log(`[api] http://127.0.0.1:${config.PORT}`);
+  app.listen(config.PORT, '0.0.0.0', () => {
+    console.log(`[api] http://0.0.0.0:${config.PORT}`);
   });
 }
 
