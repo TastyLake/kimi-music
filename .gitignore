@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.local
+media/
+data/
+dist/
+build/
+.next/
+.DS_Store
+*.log
+*.tsbuildinfo
+cookies.txt
+*_dump.txt
+project_dump.txt

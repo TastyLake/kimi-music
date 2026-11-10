@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kimi-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kimi_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kimi-net
+
+  redis:
+    image: redis:alpine
+    container_name: kimi-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - kimi-net
+
+  backend:
+    build: ./backend
+    container_name: kimi-backend
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@kimi-postgres:5432/kimi_db?schema=public
+      REDIS_URL: redis://kimi-redis:6379
+      PORT: 4000
+      JWT_ACCESS_SECRET: super_secret_access_key_12345
+      JWT_REFRESH_SECRET: super_secret_refresh_key_67890
+      CORS_ORIGIN: "http://localhost:3000,http://127.0.0.1:3000"
+    ports:
+      - "4000:4000"
+    volumes:
+      - kimi_media:/app/media
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - kimi-net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: "/api"
+        VITE_API_URL: "/api"
+        REACT_APP_API_URL: "/api"
+    container_name: kimi-frontend
+    restart: always
+    environment:
+      BACKEND_URL: http://backend:4000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - kimi-net
+
+volumes:
+  postgres_data:
+    external: true
+    name: kimi-music_postgres_data
+  kimi_media:
+
+networks:
+  kimi-net:
+    driver: bridge

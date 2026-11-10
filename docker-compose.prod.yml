@@ -1,0 +1,87 @@
+# Прод на голом VPS. Наружу только 80 и 443.
+# Секреты — в backend/.env, пароль Postgres — в корневом .env (POSTGRES_PASSWORD).
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: kimi_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kimi_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - kimi-net
+
+  redis:
+    image: redis:alpine
+    restart: always
+    networks:
+      - kimi-net
+
+  backend:
+    build: ./backend
+    restart: always
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/kimi_db?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: 4000
+      CORS_ORIGIN: https://kimi.space,https://www.kimi.space
+      MUSIC_DIR: /app/media/music
+      DATA_DIR: /app/data
+      RUN_WORKER_IN_PROCESS: "true"
+    volumes:
+      - kimi_media:/app/media
+      - kimi_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - kimi-net
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: "/api"
+    restart: always
+    environment:
+      BACKEND_URL: http://backend:4000
+    depends_on:
+      - backend
+    networks:
+      - kimi-net
+
+  caddy:
+    image: caddy:2
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+    networks:
+      - kimi-net
+
+volumes:
+  postgres_data:
+  kimi_media:
+  kimi_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  kimi-net:
+    driver: bridge

@@ -1,0 +1,4 @@
+kimi.space, www.kimi.space {
+	encode gzip
+	reverse_proxy frontend:3000
+}
