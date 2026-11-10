@@ -1,0 +1,15 @@
+{
+  "/icon.svg/route": "app/icon.svg/route.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/login/page": "app/login/page.js",
+  "/(app)/admin/page": "app/(app)/admin/page.js",
+  "/(app)/browse/page": "app/(app)/browse/page.js",
+  "/(app)/favorites/page": "app/(app)/favorites/page.js",
+  "/(app)/page": "app/(app)/page.js",
+  "/(app)/discover/page": "app/(app)/discover/page.js",
+  "/(app)/library/page": "app/(app)/library/page.js",
+  "/(app)/playlists/page": "app/(app)/playlists/page.js",
+  "/(app)/upload/page": "app/(app)/upload/page.js",
+  "/(app)/import/page": "app/(app)/import/page.js",
+  "/(app)/playlists/[id]/page": "app/(app)/playlists/[id]/page.js"
+}
