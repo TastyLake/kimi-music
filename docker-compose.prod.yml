@@ -34,7 +34,7 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/kimi_db?schema=public
       REDIS_URL: redis://redis:6379
       PORT: 4000
-      CORS_ORIGIN: https://kimi.space,https://www.kimi.space
+      CORS_ORIGIN: https://кими.space,https://www.кими.space,https://xn--h1aaej.space,https://www.xn--h1aaej.space
       MUSIC_DIR: /app/media/music
       DATA_DIR: /app/data
       RUN_WORKER_IN_PROCESS: "true"

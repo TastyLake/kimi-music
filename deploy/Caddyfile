@@ -1,4 +1,4 @@
-kimi.space, www.kimi.space {
+кими.space, www.кими.space {
 	encode gzip
 	reverse_proxy frontend:3000
 }
