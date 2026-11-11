@@ -54,7 +54,11 @@ function syncMediaSession() {
   };
   bind('play', () => usePlayer.getState()._setPlaying(true));
   bind('pause', () => usePlayer.getState()._setPlaying(false));
-  bind('previoustrack', () => usePlayer.getState().prev());
+  bind('previoustrack', () => {
+    const audio = audioRef.current;
+    if (audio) audio.currentTime = 0;
+    usePlayer.getState().prev();
+  });
   bind('nexttrack', () => usePlayer.getState().next(false));
   bind('seekto', (details) => {
     if (details.seekTime != null) usePlayer.getState().seek(details.seekTime);
