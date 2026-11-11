@@ -14,6 +14,69 @@ function onPlayError(e: unknown) {
   if ((e as Error)?.name !== 'AbortError') usePlayer.getState()._setPlaying(false);
 }
 
+function absoluteArtwork(url: string | null | undefined): string | undefined {
+  const resolved = assetUrl(url);
+  if (!resolved) return undefined;
+  if (/^https?:\/\//.test(resolved)) return resolved;
+  if (typeof window === 'undefined') return undefined;
+  return new URL(resolved, window.location.origin).href;
+}
+
+/** Кнопки «предыдущий / следующий» в шторке и на заблокированном экране iPhone. */
+function syncMediaSession() {
+  const session = navigator.mediaSession;
+  if (!session) return;
+  const state = usePlayer.getState();
+  const current = state.queue[state.index];
+  if (!current) {
+    session.metadata = null;
+    session.playbackState = 'none';
+    return;
+  }
+
+  const artwork = absoluteArtwork(current.coverUrl);
+  session.metadata = new MediaMetadata({
+    title: current.title,
+    artist: current.artist,
+    album: current.album ?? '',
+    artwork: artwork
+      ? [96, 128, 192, 256, 384, 512].map((size) => ({ src: artwork, sizes: `${size}x${size}`, type: 'image/jpeg' }))
+      : [],
+  });
+  session.playbackState = state.playing ? 'playing' : 'paused';
+
+  const bind = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+    try {
+      session.setActionHandler(action, handler);
+    } catch {
+      /* это действие браузер не показывает */
+    }
+  };
+  bind('play', () => usePlayer.getState()._setPlaying(true));
+  bind('pause', () => usePlayer.getState()._setPlaying(false));
+  bind('previoustrack', () => usePlayer.getState().prev());
+  bind('nexttrack', () => usePlayer.getState().next(false));
+  bind('seekto', (details) => {
+    if (details.seekTime != null) usePlayer.getState().seek(details.seekTime);
+  });
+  // Без этих обработчиков iPhone оставляет только «±30 секунд» и прячет смену трека.
+  bind('seekbackward', null);
+  bind('seekforward', null);
+
+  const length = state.duration || current.duration || 0;
+  if (Number.isFinite(length) && length > 0 && Number.isFinite(state.currentTime)) {
+    try {
+      session.setPositionState({
+        duration: length,
+        playbackRate: audioRef.current?.playbackRate || 1,
+        position: Math.min(Math.max(state.currentTime, 0), length),
+      });
+    } catch {
+      /* поток ещё без длительности */
+    }
+  }
+}
+
 export function GlobalPlayer() {
   const queue = usePlayer((s) => s.queue);
   const index = usePlayer((s) => s.index);
@@ -71,6 +134,10 @@ export function GlobalPlayer() {
     }
   }, [volume, muted]);
 
+  useEffect(() => {
+    syncMediaSession();
+  }, [current?.key, current?.title, current?.artist, current?.coverUrl, playing, currentTime, duration]);
+
   const dur = duration || current?.duration || 0;
   const shown = scrub ?? currentTime;
   const commitScrub = () => {
@@ -87,6 +154,7 @@ export function GlobalPlayer() {
           audioRef.current = el;
         }}
         preload="auto"
+        title={current ? `${current.artist} — ${current.title}` : undefined}
         onTimeUpdate={(e) => p()._tick(e.currentTarget.currentTime, e.currentTarget.duration)}
         onLoadedMetadata={(e) => p()._tick(e.currentTarget.currentTime, e.currentTarget.duration)}
         onPlaying={() => {
@@ -94,7 +162,10 @@ export function GlobalPlayer() {
           p()._setPlaying(true);
           if (usePlayer.getState().error) p()._setError(null);
         }}
-        onPlay={() => p()._setPlaying(true)}
+        onPlay={() => {
+          p()._setPlaying(true);
+          syncMediaSession();
+        }}
         onPause={(e) => {
           if (!e.currentTarget.ended && !switching.current) p()._setPlaying(false);
         }}
